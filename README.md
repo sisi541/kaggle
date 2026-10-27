@@ -1,103 +1,95 @@
-# House Prices：保留全部记录的第二版
+# House Prices：第三版，全记录地区模型融合
 
-本版训练和验证始终保留原始 **1460 条训练记录**，包括 ID 524、1299。
-没有删除记录、裁剪售价或设置样本权重；测试集 1459 条记录全部输出。
-入口是 `train_full.py`，交付文件为 `submission2926.csv`。
+本版继续保留全部 **1460 条训练记录和原始售价**。没有删除样本、裁剪售价、
+显式设置样本权重或按测试 ID 手工指定预测值。测试集 1459 条记录全部输出。
+
+上一版的实际 Kaggle 成绩为 **0.11883**。本版尚无线上成绩；下面的验证分数
+不能当作已经取得的 Kaggle 成绩，也不能保证一定达到 0.11。
+
+## 最终方案
+
+按 log1p 预测进行以下固定融合：
+
+- **35% 地区交互 Lasso**：学习各地区与面积、品质、房龄的中心化交互。
+  面积上限只在训练折内估计，不再给所有数值特征统一截尾。
+- **25% 地理加权 RBF-SVR**：在普通特征之外，额外加入放大 16 倍的地区及
+  地区×交易类型独热特征，使核距离更重视这些差异。放大的是特征列，不是样本权重。
+- **40% 新版 CatBoost**：depth=6、2800 轮、learning_rate=0.03、l2=3。
+  使用紧凑原生类别及逐行面积、房龄、浴室等特征，减少冗余品质多项式。
+
+训练目标为 `log1p(SalePrice)`，最后使用 `expm1` 还原成价格。
+最终提交来自各模型在全部 1460 行上重训后的预测。
 
 ## 复现
 
 已验证 Python 3.12.14，CPU，无需 GPU、Kaggle API 凭据或外部数据。
-源码包包含原始竞赛数据。进入解压后包含本文件的目录：
+下载并解压 `house_prices_source2926.zip` 后，进入源码目录：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python train_full.py --data-dir data --output-dir results_full
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python train_v3.py --data-dir data --output-dir results_v3
 ```
 
-默认重新执行三组五折验证，再在全部 1460 条记录上重训生成 CSV。
-只重训和生成提交文件：
+默认重新计算 seed=42、2026、1109 三组五折验证，再进行全量重训并生成
+`results_v3/submission2926.csv`。具体耗时取决于机器性能。
+
+只重新训练并生成 CSV：
 
 ```bash
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python train_full.py --skip-cv --output-dir fresh_results
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python train_v3.py --skip-cv --output-dir fresh_results
 ```
 
-如需复用包内本轮已生成的两组 OOF，减少计算：
+复用包内已计算的 OOF，可运行：
 
 ```bash
-python train_full.py --reuse-oof full_experiments --output-dir cached_results
+python train_v3.py --reuse-oof v3_experiments --output-dir cached_results
 ```
 
-缓存会核对源码、原始数据、权重和 OOF 文件的 SHA-256，并核对全部训练/测试 ID。
-未提供 `--reuse-oof` 时，默认从原始 CSV 重新验证。默认同时计算 seed 2926 的新 OOF。
+缓存使用源码、数据、模型参数、库版本和产物 SHA-256 校验，且会核对全部 ID
+和可用的折成员信息；更改源文件后须重新计算相应验证。
 
-## 最终模型
+## 验证方法
 
-对数空间融合：
+- 评分严格使用 `sqrt(mean((log(真实售价)-log(预测售价))**2))`。
+- 每一组 OOF 均覆盖原始全部 1460 条训练记录，包括两条特殊的大面积低价交易。
+- 地区阈值、中心值、缺失填补、偏态变换、缩放和独热编码均在训练折内拟合。
+- seed=42、2026 用于本轮开发与选择；确定模型和上述四舍五入权重后，
+  再用新 seed=1109 比较上一版和本版。
+- 这些仍是同一数据集的重新划分，不是独立外部测试集。
+- 模型未使用测试集目标或外部价格数据；`Id` 只用于输出与对齐。
 
-```text
-0.35 × Lasso（按 Neighborhood 学习折内面积上限）
-+ 0.30 × SVR（折内数值特征截尾）
-+ 0.35 × CatBoost（原生类别特征）
-```
+## 产物
 
-每个模型训练目标为 `log1p(SalePrice)`；最终用 `expm1` 还原售价。
-Lasso/SVR 对输入特征的分位数处理仅在训练折内拟合，所有行和原始售价都保留。
-CatBoost 使用完整原始记录以及逐行计算的面积、房龄、品质和地区交互特征。
-所有模型均不使用 `Id` 预测，不为任何测试 ID 手工指定售价。
+- `submission2926.csv` / `results_v3/submission2926.csv`：新版提交文件。
+- `results_v3/validation_report.json`：三组指标、折结果、版本、哈希和限制。
+- `results_v3/oof_seed*.csv`：逐行 OOF，可自行复算所有验证分数。
+- `results_v3/prediction_components.csv`：全量重训的各模型预测。
+- `v3_comparison.json`：新旧版本在相同划分下的比较。
+- `v3_experiments/`：原始实验指标与选中模型的 OOF 缓存。
+- `data/`：用户提供的原始竞赛数据。
 
-本次比较了用户建议的四个方向：Ridge/Lasso、Random Forest、XGBoost、CatBoost；
-另保留 SVR 作为有互补作用的模型。随机森林和 XGBoost 在本轮融合中未提供额外改善。
-各模型源码和实验指标均在包内，可独立复查。
+源码入口为 `train_v3.py`；三个模型分别位于 `v3_linear.py`、`v3_kernel.py`、
+`v3_cat.py`。共用特征和验证模块也包含在包内。
 
-## 验证与限制
+`v3_boost.py` 是辅助残差提升及原生类别 LightGBM 实验，收益不足，未纳入提交；
+运行前安装 `requirements-experiments.txt`。
+CatBoost 的 Ordered/Huber 配置虽在实验源码中提供，但本轮未完整执行，未计入结论。
 
-- 每组均对 **1460 条记录** 产生 OOF 预测，按比赛的精确自然对数 RMSE 评分。
-- seed 42、2026 用于开发比较；确定模型和四舍五入权重后，再计算 seed 2926。
-- 三组划分仍来自同一个数据集，不能称为独立外部测试集。
-- 两条特殊交易仍可能有较大误差；报告包含它们的 OOF 预测和所属折。
-- 旧版本的实际 Kaggle 成绩为 **0.12375**。新版尚无 Kaggle 成绩，不能保证达到 0.11。
-- 原版本的 0.10743 是剔除两条记录后的结果，不能与本版全记录验证直接比较。
-  原线性融合在全 1460 条记录上的 seed42 结果为 0.12917。
+## 输出检查
 
-完整数值见 `results_full/validation_report.json`；逐样本验证预测见
-`results_full/oof_seed*.csv`，可直接复算分数。CSV 满足 `Id,SalePrice` 格式，
-不带索引，测试 ID 顺序一致，预测全部为正且有限。
+CSV 应为 1459 行、两列 `Id,SalePrice`，不含额外索引；ID 顺序与测试集一致，
+价格为正且有限。报告记录提交 SHA-256，可区分旧版文件和本版文件。
 
-## 文件
+## 本轮实测比较
 
-- `train_full.py`：最终训练、完整验证、提交生成入口。
-- `features.py`、`linear_models.py`：共用特征与折内预处理。
-- `full_linear.py`、`full_linear_features.py`：全记录 Ridge/Lasso/SVR 实验与模型。
-- `full_cat.py`：全记录 CatBoost 实验与 sklearn 兼容模型。
-- `full_forest.py`：全记录 Random Forest/ExtraTrees 实验。
-- `full_xgb.py`、`full_cv.py`：全记录 XGBoost 与共用验证器。
-- `full_experiments/`：各方向指标、选中模型 OOF 及校验清单。
-- `results_full/`：最终验证报告、OOF、基模型预测和提交文件。
-- `data/`：用户提供的原始比赛数据。
+| 全量五折划分 | 上一版 V2 | 新版 V3 | 用途 |
+|---|---:|---:|---|
+| seed=42 | 0.118094 | 0.114449 | 开发选择 |
+| seed=2026 | 0.118077 | 0.112920 | 开发选择 |
+| seed=1109 | 0.115685 | 0.113471 | 固定方案后复核 |
 
-辅助实验命令：
+所有分数均对全部 1460 条记录评分。三组都属于本地验证，新版线上分数尚待实际提交确认。
 
-```bash
-python full_linear.py --seed 42 --models full_lasso_neighborhood98 full_ridge_clip full_svr_clip
-python full_forest.py --seed 42 --models rf_leaf1
-python full_xgb.py --seed 42 --models xgb_d3
-python full_cat.py --seed 42 --models cat_full_d5
-```
-
-## 本轮实测结果
-
-| 模型 | seed42 五折 | seed2026 五折 |
-|---|---:|---:|
-| Lasso | 0.121573 | 0.122139 |
-| Ridge | 0.123701 | 0.123204 |
-| SVR | 0.122022 | 0.122982 |
-| XGBoost | 0.127279 | 0.120031 |
-| CatBoost | 0.123920 | 0.123178 |
-| Random Forest | 0.140291 | 0.137833 |
-| Final ensemble | 0.118094 | 0.118077 |
-
-固定融合方案后，seed2926 五折复核为 **0.116778**。所有分数均覆盖全部 1460 条记录。
-
-两次独立重训生成的提交 CSV 逐字节一致。以上为本地交叉验证，不是新版 Kaggle 成绩。
+本轮两次全量重训生成的 CSV 逐字节一致；源码、数据和 OOF 校验已完成。
